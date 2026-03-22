@@ -2,22 +2,29 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { registerSchema, loginSchema, createTaskSchema, updateTaskSchema } from "@shared/schema";
-import session from "express-session";
-import createMemoryStore from "memorystore";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 
-const MemoryStore = createMemoryStore(session);
+// In-memory token store (maps token -> userId)
+const tokenStore = new Map<string, number>();
 
-declare module "express-session" {
-  interface SessionData {
-    userId: number;
-  }
+function generateToken(): string {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function getUserIdFromToken(req: Request): number | null {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) return null;
+  const token = header.slice(7);
+  return tokenStore.get(token) ?? null;
 }
 
 function requireAuth(req: Request, res: Response, next: NextFunction) {
-  if (!req.session.userId) {
+  const userId = getUserIdFromToken(req);
+  if (!userId) {
     return res.status(401).json({ message: "Unauthorized" });
   }
+  (req as any).userId = userId;
   next();
 }
 
@@ -25,20 +32,6 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // Session setup
-  app.use(
-    session({
-      secret: "taskflow-secret-key-2026",
-      resave: false,
-      saveUninitialized: false,
-      store: new MemoryStore({ checkPeriod: 86400000 }),
-      cookie: {
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-        httpOnly: true,
-        sameSite: "lax",
-      },
-    })
-  );
 
   // ── Auth Routes ──
 
@@ -55,8 +48,9 @@ export async function registerRoutes(
         password: hashedPassword,
         name: data.name,
       });
-      req.session.userId = user.id;
-      return res.json({ id: user.id, email: user.email, name: user.name });
+      const token = generateToken();
+      tokenStore.set(token, user.id);
+      return res.json({ id: user.id, email: user.email, name: user.name, token });
     } catch (err: any) {
       if (err.errors) {
         return res.status(400).json({ message: err.errors[0]?.message || "Validation error" });
@@ -76,8 +70,9 @@ export async function registerRoutes(
       if (!valid) {
         return res.status(401).json({ message: "Invalid email or password" });
       }
-      req.session.userId = user.id;
-      return res.json({ id: user.id, email: user.email, name: user.name });
+      const token = generateToken();
+      tokenStore.set(token, user.id);
+      return res.json({ id: user.id, email: user.email, name: user.name, token });
     } catch (err: any) {
       if (err.errors) {
         return res.status(400).json({ message: err.errors[0]?.message || "Validation error" });
@@ -87,16 +82,19 @@ export async function registerRoutes(
   });
 
   app.post("/api/auth/logout", (req: Request, res: Response) => {
-    req.session.destroy(() => {
-      res.json({ message: "Logged out" });
-    });
+    const header = req.headers.authorization;
+    if (header && header.startsWith("Bearer ")) {
+      tokenStore.delete(header.slice(7));
+    }
+    res.json({ message: "Logged out" });
   });
 
   app.get("/api/auth/me", (req: Request, res: Response) => {
-    if (!req.session.userId) {
+    const userId = getUserIdFromToken(req);
+    if (!userId) {
       return res.status(401).json({ message: "Not authenticated" });
     }
-    const user = storage.getUser(req.session.userId);
+    const user = storage.getUser(userId);
     if (!user) {
       return res.status(401).json({ message: "User not found" });
     }
@@ -106,7 +104,7 @@ export async function registerRoutes(
   // ── Task Routes ──
 
   app.get("/api/tasks", requireAuth, (req: Request, res: Response) => {
-    const tasks = storage.getTasksByUser(req.session.userId!);
+    const tasks = storage.getTasksByUser((req as any).userId);
     return res.json(tasks);
   });
 
@@ -115,7 +113,7 @@ export async function registerRoutes(
       const data = createTaskSchema.parse(req.body);
       const task = storage.createTask({
         ...data,
-        userId: req.session.userId!,
+        userId: (req as any).userId,
         createdAt: new Date().toISOString(),
         description: data.description ?? null,
         dueDate: data.dueDate ?? null,
@@ -133,7 +131,7 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const data = updateTaskSchema.parse(req.body);
-      const task = storage.updateTask(id, req.session.userId!, data);
+      const task = storage.updateTask(id, (req as any).userId, data);
       if (!task) {
         return res.status(404).json({ message: "Task not found" });
       }
@@ -148,7 +146,7 @@ export async function registerRoutes(
 
   app.delete("/api/tasks/:id", requireAuth, (req: Request, res: Response) => {
     const id = parseInt(req.params.id);
-    const deleted = storage.deleteTask(id, req.session.userId!);
+    const deleted = storage.deleteTask(id, (req as any).userId);
     if (!deleted) {
       return res.status(404).json({ message: "Task not found" });
     }

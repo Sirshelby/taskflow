@@ -1,5 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { apiRequest, queryClient, getQueryFn } from "@/lib/queryClient";
+import { apiRequest, queryClient, getQueryFn, setAuthToken, getAuthToken } from "@/lib/queryClient";
 
 type AuthUser = { id: number; email: string; name: string } | null;
 
@@ -9,15 +9,21 @@ export function useAuth() {
     queryFn: getQueryFn({ on401: "returnNull" }),
     staleTime: Infinity,
     retry: false,
+    // Only attempt if we have a token
+    enabled: !!getAuthToken(),
   });
+
+  // If no token exists, we're definitely not authenticated and not loading
+  const effectiveLoading = getAuthToken() ? isLoading : false;
 
   const loginMutation = useMutation({
     mutationFn: async (data: { email: string; password: string }) => {
       const res = await apiRequest("POST", "/api/auth/login", data);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+    onSuccess: (data) => {
+      setAuthToken(data.token);
+      queryClient.setQueryData(["/api/auth/me"], { id: data.id, email: data.email, name: data.name });
     },
   });
 
@@ -26,8 +32,9 @@ export function useAuth() {
       const res = await apiRequest("POST", "/api/auth/register", data);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+    onSuccess: (data) => {
+      setAuthToken(data.token);
+      queryClient.setQueryData(["/api/auth/me"], { id: data.id, email: data.email, name: data.name });
     },
   });
 
@@ -36,6 +43,7 @@ export function useAuth() {
       await apiRequest("POST", "/api/auth/logout");
     },
     onSuccess: () => {
+      setAuthToken(null);
       queryClient.setQueryData(["/api/auth/me"], null);
       queryClient.invalidateQueries({ queryKey: ["/api/tasks"] });
     },
@@ -43,7 +51,7 @@ export function useAuth() {
 
   return {
     user,
-    isLoading,
+    isLoading: effectiveLoading,
     isAuthenticated: !!user,
     login: loginMutation,
     register: registerMutation,
